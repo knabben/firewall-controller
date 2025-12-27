@@ -2,33 +2,39 @@
 # This builds a Windows container image for running as a HostProcess container
 
 # Build stage
-FROM --platform=windows/amd64 golang:1.21-windowsservercore-ltsc2022 AS builder
+FROM --platform=windows/amd64 golang:1.23-windowsservercore-ltsc2022 AS builder
+ARG TARGETOS=windows
+ARG TARGETARCH=amd64
 
 WORKDIR /workspace
 
-# Copy go mod files
-COPY go.mod go.sum ./
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
 
-# Download dependencies
+# Cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
 RUN go mod download
 
-# Copy source code
-COPY cmd/ cmd/
+# Copy the go source
+COPY cmd/main.go cmd/main.go
 COPY internal/ internal/
 
-# Build the binary
-RUN go build -o networkpolicy-agent.exe ./cmd/
+# Build the Windows binary
+# CGO must be enabled for hcsshim on Windows
+RUN go build -o networkpolicy-agent.exe ./cmd/main.go
 
-# Final stage - use a minimal Windows base image
-FROM --platform=windows/amd64 mcr.microsoft.com/windows/nanoserver:ltsc2022
+# Final stage - use Windows Server Core for HostProcess containers
+# HostProcess containers require Server Core (not Nano Server)
+FROM --platform=windows/amd64 mcr.microsoft.com/windows/servercore:ltsc2022
 
 WORKDIR /
 
 # Copy the binary from builder
 COPY --from=builder /workspace/networkpolicy-agent.exe /networkpolicy-agent.exe
 
-# This container runs as a HostProcess container with elevated privileges
-# to access HCN (Host Compute Network) APIs
-USER ContainerAdministrator
+# HostProcess containers run with elevated privileges by default
+# The USER directive is not needed as it's controlled by the pod securityContext
+# USER ContainerAdministrator
 
 ENTRYPOINT ["/networkpolicy-agent.exe"]

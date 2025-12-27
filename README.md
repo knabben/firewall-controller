@@ -1,121 +1,334 @@
-# networkpolicy-agent
-// TODO(user): Add simple overview of use/purpose
+# NetworkPolicy Agent for Windows
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+A Kubernetes agent that watches native NetworkPolicy resources and translates them into Windows Host Compute Network (HCN) ACL rules. This enables NetworkPolicy support on Windows nodes without requiring a CNI plugin that supports NetworkPolicy.
 
-## Getting Started
+## Overview
 
-### Prerequisites
-- go version v1.23.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+The NetworkPolicy Agent runs as a DaemonSet on Windows nodes and provides:
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- **Native NetworkPolicy Support**: Watches standard Kubernetes `networking.k8s.io/v1` NetworkPolicy resources (no custom CRDs)
+- **HCN Integration**: Converts NetworkPolicy rules to Windows HCN ACL rules and applies them to container endpoints
+- **Windows-Only**: Specifically designed for Windows Server 2019+ with HostProcess container support
+- **Production-Ready**: Built with Kubebuilder, includes metrics, health probes, and proper RBAC
 
-```sh
-make docker-build docker-push IMG=<some-registry>/networkpolicy-agent:tag
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                           │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │         NetworkPolicy (native K8s resource)               │  │
+│  │         networking.k8s.io/v1                               │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │      NetworkPolicy Agent (DaemonSet on Windows)           │  │
+│  │                                                            │  │
+│  │  • Watches NetworkPolicy resources                         │  │
+│  │  • Parses ingress/egress rules                            │  │
+│  │  • Converts to HCN ACL policies                           │  │
+│  │  • Applies via hcsshim                                    │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              Windows Host (HCN/HNS)                        │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+## Features
 
-**Install the CRDs into the cluster:**
+✅ **Native NetworkPolicy Support** - Works with standard Kubernetes NetworkPolicy resources
+✅ **Ingress & Egress Rules** - Supports both traffic directions
+✅ **IPBlock CIDR Filtering** - Filter traffic by source/destination IP ranges
+✅ **Protocol Support** - TCP, UDP, and SCTP protocols
+✅ **Port Filtering** - Allow/block specific ports
+✅ **Automatic Rule Management** - Rules are automatically applied and cleaned up
+✅ **HostProcess Container** - Runs with required privileges to access HCN APIs
+✅ **Metrics & Health Probes** - Prometheus metrics and health/readiness endpoints
+✅ **Leader Election** - Supports running multiple replicas (though DaemonSet typically runs one per node)
 
-```sh
-make install
+### Current Limitations
+
+⚠️ **PodSelector** - Not yet supported (requires pod IP mapping)
+⚠️ **NamespaceSelector** - Not yet supported (requires namespace resolution)
+⚠️ **Named Ports** - Not yet supported (requires pod inspection)
+
+Currently, only `ipBlock` peers are supported. Support for selectors is planned for future releases.
+
+## Prerequisites
+
+- **Kubernetes Cluster**: v1.28.0+
+- **Windows Nodes**: Windows Server 2019+ with HCN support
+- **HostProcess Support**: Kubernetes 1.22+ with HostProcess containers enabled
+- **Go**: v1.23.0+ (for building from source)
+- **Docker**: For building container images
+- **kubectl**: v1.28.0+
+
+## Installation
+
+### Quick Start
+
+1. **Build and push the Windows container image:**
+
+```bash
+export IMG=myregistry/networkpolicy-agent:v1.0.0
+make docker-build-windows
+make docker-push-windows
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+2. **Deploy to your cluster:**
 
-```sh
-make deploy IMG=<some-registry>/networkpolicy-agent:tag
+```bash
+# Update the image in config/manager/kustomization.yaml first
+kubectl apply -k config/default
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+3. **Verify deployment:**
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
+```bash
+kubectl get daemonset -n networkpolicy-agent-system
+kubectl get pods -n networkpolicy-agent-system -o wide
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+### Manual Deployment
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+If you prefer to deploy manifests directly:
 
-```sh
-kubectl delete -k config/samples/
+```bash
+# Deploy RBAC
+kubectl apply -f config/rbac/
+
+# Deploy the DaemonSet
+kubectl apply -f config/manager/
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+## Usage
 
-```sh
-make uninstall
+### Creating a NetworkPolicy
+
+The agent watches standard Kubernetes NetworkPolicy resources:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-traffic
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 443
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: UDP
+      port: 53
 ```
 
-**UnDeploy the controller from the cluster:**
+### Viewing Applied Rules
 
-```sh
-make undeploy
+On a Windows node, you can inspect HCN endpoints and their ACL policies:
+
+```powershell
+# List all HCN endpoints
+Get-HnsEndpoint | Select Id, Name
+
+# View policies on a specific endpoint
+$ep = Get-HnsEndpoint -Id "<endpoint-id>"
+$ep.Policies | ConvertFrom-Json | Where-Object { $_.Type -eq "ACL" } | Format-List
 ```
 
-## Project Distribution
+### Monitoring
 
-Following the options to release and provide this solution to the users.
+The agent exposes Prometheus metrics on port 8443 (by default):
 
-### By providing a bundle with all YAML files
+```bash
+# Port-forward to access metrics
+kubectl port-forward -n networkpolicy-agent-system deploy/controller-manager 8443:8443
 
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/networkpolicy-agent:tag
+# Access metrics
+curl -k https://localhost:8443/metrics
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+Health and readiness probes are available at:
+- Liveness: `http://localhost:8081/healthz`
+- Readiness: `http://localhost:8081/readyz`
 
-2. Using the installer
+## Configuration
 
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
+### Environment Variables
 
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/networkpolicy-agent/<tag or branch>/dist/install.yaml
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `NODE_NAME` | Name of the Kubernetes node | Yes | Set via Downward API |
+
+### Command-Line Flags
+
+The agent supports standard controller-runtime flags:
+
+- `--leader-elect`: Enable leader election (default: false)
+- `--metrics-bind-address`: Metrics endpoint address (default: :8443)
+- `--health-probe-bind-address`: Health probe address (default: :8081)
+
+## Development
+
+### Building from Source
+
+```bash
+# Build Windows binary (cross-compile from Linux/macOS)
+GOOS=windows GOARCH=amd64 go build -o bin/networkpolicy-agent.exe ./cmd/main.go
+
+# Or use Make
+make build
 ```
 
-### By providing a Helm Chart
+### Running Tests
 
-1. Build the chart using the optional helm plugin
+```bash
+# Run all tests (requires Windows or will be skipped)
+make test
 
-```sh
-kubebuilder edit --plugins=helm/v1-alpha
+# Run specific package tests
+go test ./internal/converter/... -v
+go test ./internal/hcn/... -v
+go test ./internal/controller/... -v
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
+### Manual Testing
 
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+A manual testing tool is included in `examples/apply-acl/`:
+
+```bash
+# Build the example (on Windows)
+cd examples/apply-acl
+go build -o apply-acl.exe .
+
+# Apply example ACL rules
+.\apply-acl.exe -action apply -policy "test/example"
+
+# List tracked policies
+.\apply-acl.exe -action list
+
+# Remove rules
+.\apply-acl.exe -action remove -policy "test/example"
+```
+
+See `examples/apply-acl/README.md` for more details.
+
+## Project Structure
+
+```
+firewall-controller/
+├── cmd/
+│   └── main.go                    # Main entry point
+├── internal/
+│   ├── controller/                # NetworkPolicy reconciler
+│   │   ├── networkpolicy_controller.go
+│   │   └── networkpolicy_controller_test.go
+│   ├── converter/                 # NetworkPolicy → ACL converter
+│   │   ├── policy.go
+│   │   └── policy_test.go
+│   └── hcn/                       # HCN client wrapper
+│       ├── types.go
+│       ├── acl.go
+│       └── acl_test.go
+├── config/
+│   ├── manager/                   # DaemonSet deployment
+│   │   └── manager.yaml
+│   ├── rbac/                      # RBAC configuration
+│   │   └── role.yaml
+│   └── default/                   # Kustomize overlays
+│       └── kustomization.yaml
+├── examples/
+│   └── apply-acl/                 # Manual testing tool
+├── Dockerfile                     # Linux Dockerfile (for development)
+├── Dockerfile.windows             # Windows production Dockerfile
+└── Makefile                       # Build automation
+```
+
+## Troubleshooting
+
+### Agent Not Starting
+
+**Check DaemonSet status:**
+```bash
+kubectl describe daemonset -n networkpolicy-agent-system controller-manager
+```
+
+**Check pod logs:**
+```bash
+kubectl logs -n networkpolicy-agent-system -l control-plane=controller-manager
+```
+
+**Common issues:**
+- Pod not scheduled on Windows node: Check nodeSelector
+- Permission errors: Verify RBAC and HostProcess configuration
+- Image pull errors: Ensure image is accessible from Windows nodes
+
+### Rules Not Applied
+
+**Verify NetworkPolicy was created:**
+```bash
+kubectl get networkpolicy -A
+kubectl describe networkpolicy <name> -n <namespace>
+```
+
+**Check agent logs for errors:**
+```bash
+kubectl logs -n networkpolicy-agent-system -l control-plane=controller-manager --tail=100
+```
+
+**Verify HCN endpoints exist:**
+```powershell
+# On Windows node
+Get-HnsEndpoint
+```
+
+### No HCN Endpoints Found
+
+This usually means no containers are running on the Windows node. The agent applies rules to existing HCN endpoints created by container runtime.
+
+**Create a test pod:**
+```bash
+kubectl run test-pod --image=mcr.microsoft.com/windows/nanoserver:ltsc2022 --command -- ping -t localhost
+```
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+Contributions are welcome! Please:
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Development Guidelines
+
+- Add tests for new features
+- Update documentation
+- Follow existing code style
+- Ensure Windows builds succeed
 
 ## License
 
@@ -133,3 +346,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+## Acknowledgments
+
+- Built with [Kubebuilder](https://book.kubebuilder.io/)
+- Uses [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
+- Windows HCN integration via [hcsshim](https://github.com/microsoft/hcsshim)
+
+## Related Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed architecture documentation
+- [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) - Implementation details and phases
+- [CLAUDE.md](CLAUDE.md) - Kubernetes controller development guide
+- [examples/apply-acl/README.md](examples/apply-acl/README.md) - Manual testing guide

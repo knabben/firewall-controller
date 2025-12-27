@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+*.md
+!README.md
+CLAUDE.md
+IMPLEMENTATION_PLAN.md
+
+# Build artifacts
+bin/
+*.exe
+!networkpolicy-agent.exe
+
+# Examples and tests
+examples/
+*_test.go
+testdata/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kubernetes configs (not needed in image)
+config/
+
+# Makefile
+Makefile

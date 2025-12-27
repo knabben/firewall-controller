@@ -1,0 +1,34 @@
+# Dockerfile for Windows NetworkPolicy Agent
+# This builds a Windows container image for running as a HostProcess container
+
+# Build stage
+FROM --platform=windows/amd64 golang:1.21-windowsservercore-ltsc2022 AS builder
+
+WORKDIR /workspace
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY cmd/ cmd/
+COPY internal/ internal/
+
+# Build the binary
+RUN go build -o networkpolicy-agent.exe ./cmd/
+
+# Final stage - use a minimal Windows base image
+FROM --platform=windows/amd64 mcr.microsoft.com/windows/nanoserver:ltsc2022
+
+WORKDIR /
+
+# Copy the binary from builder
+COPY --from=builder /workspace/networkpolicy-agent.exe /networkpolicy-agent.exe
+
+# This container runs as a HostProcess container with elevated privileges
+# to access HCN (Host Compute Network) APIs
+USER ContainerAdministrator
+
+ENTRYPOINT ["/networkpolicy-agent.exe"]

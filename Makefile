@@ -15,7 +15,16 @@ EXAMPLE_BINARY=apply-acl
 # Build flags for Windows
 WINDOWS_BUILD_FLAGS=GOOS=windows GOARCH=amd64
 
-.PHONY: all build test clean deps tidy help
+# Docker image
+IMAGE_NAME ?= networkpolicy-agent
+IMAGE_TAG ?= latest
+REGISTRY ?= ghcr.io/knabben
+
+# Directories
+BIN_DIR=bin
+CONFIG_DIR=config
+
+.PHONY: all build test clean deps tidy help docker-build
 
 ## help: Show this help message
 help:
@@ -92,5 +101,39 @@ lint:
 
 ## check: Run format, vet, and tests
 check: fmt vet test
+
+## docker-build: Build Docker image for Windows
+docker-build:
+	@echo "Building Docker image for Windows..."
+	docker build --platform windows/amd64 -f Dockerfile.windows -t $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) .
+
+## docker-push: Push Docker image to registry
+docker-push:
+	@echo "Pushing Docker image..."
+	docker push $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
+
+## docker-build-push: Build and push Docker image
+docker-build-push: docker-build docker-push
+
+## install: Install CRDs (placeholder for future)
+install:
+	@echo "No CRDs to install (using native NetworkPolicy)"
+
+## run: Run the agent locally (requires Windows)
+run:
+	@echo "Running agent locally..."
+	$(WINDOWS_BUILD_FLAGS) $(GOCMD) run ./cmd/main.go
+
+## deploy: Deploy manifests to Kubernetes cluster
+deploy:
+	@echo "Deploying to Kubernetes..."
+	kubectl apply -f $(CONFIG_DIR)/rbac/
+	kubectl apply -f $(CONFIG_DIR)/daemonset/
+
+## undeploy: Remove manifests from Kubernetes cluster
+undeploy:
+	@echo "Removing from Kubernetes..."
+	kubectl delete -f $(CONFIG_DIR)/daemonset/ --ignore-not-found=true
+	kubectl delete -f $(CONFIG_DIR)/rbac/ --ignore-not-found=true
 
 .DEFAULT_GOAL := help
